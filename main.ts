@@ -1,311 +1,269 @@
-// One ripe strawberry, drawn programmatically.
-// make.fun entry: the-picture-that-tastes-of-one-20261122-2047
-// "The picture that tastes of one ingredient" — a single strawberry.
-// Node 22, stdlib only, no network. Writes a deterministic 1024x1024 PNG.
+// The picture that tastes of one ingredient — one ripe strawberry.
+// Drawn entirely in code: 1024x1024 RGBA buffer, own PNG encoder, stdlib only.
 import { writeFileSync, mkdirSync } from "node:fs";
 import { deflateSync } from "node:zlib";
 import { dirname } from "node:path";
 
 const W = 1024;
 const H = 1024;
-const img = Buffer.alloc(W * H * 4);
+const buf = new Uint8Array(W * H * 4);
 
-const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
-const lerp = (a, b, t) => a + (b - a) * t;
-const sstep = (a, b, t) => {
-  const x = clamp((t - a) / (b - a), 0, 1);
-  return x * x * (3 - 2 * x);
-};
-// Deterministic hash noise (no Math.random anywhere).
-const hash2 = (x, y) => {
+function clamp(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+// Deterministic per-pixel speckle, independent of draw order.
+function hash2(x: number, y: number): number {
   const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
   return s - Math.floor(s);
-};
-
-function setPx(x, y, r, g, b) {
-  if (x < 0 || x >= W || y < 0 || y >= H) return;
-  const i = (y * W + x) * 4;
-  img[i] = r;
-  img[i + 1] = g;
-  img[i + 2] = b;
-  img[i + 3] = 255;
 }
 
-function blendPx(x, y, r, g, b, a) {
-  if (x < 0 || x >= W || y < 0 || y >= H || a <= 0) return;
-  if (a > 1) a = 1;
+function blend(x: number, y: number, r: number, g: number, b: number, a: number): void {
+  if (x < 0 || y < 0 || x >= W || y >= H || a <= 0) return;
   const i = (y * W + x) * 4;
-  const ia = 1 - a;
-  img[i] = r * a + img[i] * ia;
-  img[i + 1] = g * a + img[i + 1] * ia;
-  img[i + 2] = b * a + img[i + 2] * ia;
-  img[i + 3] = 255;
+  if (a >= 255) {
+    buf[i] = r; buf[i + 1] = g; buf[i + 2] = b; buf[i + 3] = 255;
+    return;
+  }
+  const sa = a / 255;
+  const da = 1 - sa;
+  buf[i] = Math.round(r * sa + buf[i] * da);
+  buf[i + 1] = Math.round(g * sa + buf[i + 1] * da);
+  buf[i + 2] = Math.round(b * sa + buf[i + 2] * da);
+  buf[i + 3] = 255;
 }
 
-// Filled ellipse, optionally with per-pixel alpha falloff at the rim.
-function ellipse(cx, cy, rx, ry, r, g, b, a = 1, soft = 0) {
-  const x0 = Math.max(0, Math.floor(cx - rx - 1));
-  const x1 = Math.min(W - 1, Math.ceil(cx + rx + 1));
-  const y0 = Math.max(0, Math.floor(cy - ry - 1));
-  const y1 = Math.min(H - 1, Math.ceil(cy + ry + 1));
-  for (let y = y0; y <= y1; y++) {
-    const ny = (y - cy) / ry;
-    for (let x = x0; x <= x1; x++) {
-      const nx = (x - cx) / rx;
-      const d = nx * nx + ny * ny;
-      if (d > 1) continue;
-      let alpha = a;
-      if (soft > 0) alpha = a * clamp((1 - d) / soft, 0, 1);
-      if (alpha >= 1) setPx(x, y, r, g, b);
-      else blendPx(x, y, r, g, b, alpha);
+function fillEllipse(cx: number, cy: number, rx: number, ry: number, r: number, g: number, b: number, a = 255): void {
+  for (let y = Math.floor(cy - ry); y <= Math.ceil(cy + ry); y++) {
+    const dy = (y - cy) / ry;
+    const rem = 1 - dy * dy;
+    if (rem < 0) continue;
+    const dx = rx * Math.sqrt(rem);
+    for (let x = Math.floor(cx - dx); x <= Math.ceil(cx + dx); x++) {
+      blend(x, y, r, g, b, a);
     }
   }
 }
 
-// ---------- 1. Warm cream background ----------
-for (let y = 0; y < H; y++) {
-  for (let x = 0; x < W; x++) {
-    const dx = (x - 512) / 512;
-    const dy = (y - 470) / 512;
-    const d = Math.sqrt(dx * dx + dy * dy);
-    const t = clamp(d, 0, 1);
-    // Center #f8e6cb -> edges #eec193 (smooth radial gradient, no per-pixel
-    // noise: it would bloat the PNG past the 1 MiB limit).
-    const r = lerp(248, 238, t);
-    const g = lerp(230, 193, t);
-    const b = lerp(203, 147, t);
-    setPx(x, y, clamp(r, 0, 255), clamp(g, 0, 255), clamp(b, 0, 255));
+function fillPoly(pts: Array<[number, number]>, r: number, g: number, b: number, a = 255): void {
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const [, y] of pts) {
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  }
+  for (let y = Math.ceil(minY); y <= Math.floor(maxY); y++) {
+    const xs: number[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const [x1, y1] = pts[i];
+      const [x2, y2] = pts[(i + 1) % pts.length];
+      if ((y1 <= y && y2 > y) || (y2 <= y && y1 > y)) {
+        xs.push(x1 + ((y - y1) / (y2 - y1)) * (x2 - x1));
+      }
+    }
+    xs.sort((x, z) => x - z);
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      for (let x = Math.ceil(xs[k]); x <= Math.floor(xs[k + 1]); x++) {
+        blend(x, y, r, g, b, a);
+      }
+    }
   }
 }
 
-// ---------- 2. White plate ----------
-ellipse(512, 872, 388, 94, 226, 206, 180); // rim
-ellipse(512, 870, 370, 84, 253, 251, 245); // plate face
-// Soft contact shadow where the berry will sit.
-ellipse(512, 888, 235, 46, 150, 90, 70, 0.16, 0.55);
+// ---- warm cream backdrop, lighter in the middle ----
+for (let y = 0; y < H; y++) {
+  for (let x = 0; x < W; x++) {
+    const t = y / (H - 1);
+    const d = Math.hypot(x - 512, y - 470) / 720;
+    const glow = Math.max(0, 1 - d) * 26;
+    blend(x, y, 243 + glow * 0.4 - t * 12, 216 + glow * 0.35 - t * 26, 168 + glow * 0.3 - t * 40, 255);
+  }
+}
 
-// ---------- 3. Strawberry body ----------
-// Outline: (y, half-width) control points, top to tip.
-const OUTLINE = [
-  [258, 30], [282, 140], [315, 215], [365, 272], [425, 298],
-  [495, 300], [570, 278], [650, 240], [725, 190], [795, 128],
-  [850, 72], [885, 28], [896, 0],
+// ---- white plate, flat ellipse ----
+fillEllipse(512, 880, 342, 84, 228, 216, 198, 255);
+fillEllipse(512, 876, 324, 74, 253, 251, 247, 255);
+// soft contact shadow where the berry sits
+fillEllipse(512, 862, 215, 48, 186, 148, 116, 78);
+fillEllipse(512, 866, 160, 34, 176, 138, 108, 60);
+
+// ---- strawberry body profile: broad shoulders, tapering tip ----
+const PROFILE: Array<[number, number]> = [
+  [0, 138], [0.07, 244], [0.18, 300], [0.32, 306], [0.45, 283],
+  [0.58, 246], [0.72, 196], [0.84, 138], [0.93, 82], [1, 0],
 ];
-function halfWidth(y) {
-  if (y <= OUTLINE[0][0]) return OUTLINE[0][1];
-  for (let i = 0; i < OUTLINE.length - 1; i++) {
-    const [y0, w0] = OUTLINE[i];
-    const [y1, w1] = OUTLINE[i + 1];
-    if (y >= y0 && y <= y1) {
-      const t = sstep(y0, y1, y);
-      return lerp(w0, w1, t);
+function halfWidth(t: number): number {
+  if (t <= 0) return PROFILE[0][1];
+  for (let i = 0; i < PROFILE.length - 1; i++) {
+    const [t0, w0] = PROFILE[i];
+    const [t1, w1] = PROFILE[i + 1];
+    if (t <= t1) {
+      const u = (t - t0) / (t1 - t0);
+      const s = (1 - Math.cos(u * Math.PI)) / 2;
+      return w0 + (w1 - w0) * s;
     }
   }
   return 0;
 }
 
-const TOP = 258;
-const BOT = 896;
-for (let y = TOP; y <= BOT; y++) {
-  const hw = halfWidth(y);
-  if (hw <= 0) continue;
-  const ny = (y - TOP) / (BOT - TOP);
-  for (let x = Math.ceil(512 - hw); x <= Math.floor(512 + hw); x++) {
-    const nx = (x - 512) / hw; // -1 (left) .. +1 (right)
-    // Light comes from the upper left: bright there, deep red lower right.
-    let lit = 0.82 - 0.42 * nx - 0.22 * (ny - 0.25);
-    // Soft vertical sheen bands, like a glossy skin.
-    lit += 0.035 * Math.sin(y * 0.11 + nx * 3.0);
-    lit = clamp(lit, 0.18, 1.18);
-    // Smooth low-frequency skin texture (compresses well in PNG).
-    const n = 4.5 * Math.sin(x * 0.045 + 1.7) * Math.sin(y * 0.06 + 0.4);
-    const r = clamp(138 + 118 * lit + n, 0, 255);
-    const g = clamp(16 + 34 * lit + n * 0.6, 0, 255);
-    const b = clamp(26 + 30 * lit + n * 0.6, 0, 255);
-    setPx(x, y, r, g, b);
-  }
-}
-
-// Big soft specular highlight, upper left of the body.
-for (let y = 300; y <= 540; y++) {
-  for (let x = 320; x <= 560; x++) {
-    const dx = (x - 428) / 105;
-    const dy = (y - 415) / 140;
-    const d2 = dx * dx + dy * dy;
-    if (d2 > 1) continue;
-    const a = 0.34 * Math.exp(-d2 * 2.2);
-    blendPx(x, y, 255, 205, 205, a);
-  }
-}
-
-// ---------- 4. Pale-gold seeds, in rows that follow the body contour ----------
-function seed(cx, cy) {
-  // Tiny pit shadow first, then the golden seed.
-  ellipse(cx + 1, cy + 3, 6.5, 9.5, 120, 30, 35, 0.28, 0.6);
-  ellipse(cx, cy, 5.5, 8.5, 238, 196, 96);
-  ellipse(cx - 1, cy - 2, 3.5, 5.5, 252, 228, 150);
-}
-let row = 0;
-for (let y = 332; y <= 832; y += 52, row++) {
-  const hw = halfWidth(y) - 30;
-  if (hw < 20) continue;
-  const step = 62;
-  const count = Math.floor(hw / step);
-  const off = row % 2 === 0 ? 0 : step / 2;
-  for (let k = -count; k <= count; k++) {
-    const x = 512 + k * step + off;
-    if (Math.abs(x - 512) > hw) continue;
-    seed(Math.round(x), y);
-  }
-}
-
-// ---------- 5. Green calyx: pointed leaves fanning out from the top ----------
-function leaf(angleDeg, len, wid, shade) {
-  const a = (angleDeg * Math.PI) / 180;
+// leaves first, so their bases tuck behind the berry top
+function drawLeaf(spreadDeg: number, len: number, wid: number): void {
+  const a = (spreadDeg * Math.PI) / 180;
   const dx = Math.sin(a);
   const dy = -Math.cos(a);
   const bx = 512;
-  const by = 272;
-  const x0 = Math.max(0, Math.floor(bx - len));
-  const x1 = Math.min(W - 1, Math.ceil(bx + len));
-  const y0 = Math.max(0, Math.floor(by - len));
-  const y1 = Math.min(H - 1, Math.ceil(by + len));
-  for (let y = y0; y <= y1; y++) {
-    for (let x = x0; x <= x1; x++) {
-      const px = x - bx;
-      const py = y - by;
-      const u = px * dx + py * dy; // along the leaf
-      const v = -px * dy + py * dx; // across the leaf
-      if (u < 2 || u > len) continue;
-      const t = u / len;
-      const half = wid * Math.pow(Math.sin(Math.PI * (0.12 + 0.88 * t)), 0.9);
-      if (Math.abs(v) > half) continue;
-      const base = 1 - t * 0.45;
-      const vein = Math.abs(v) < 1.6 ? 1.25 : 1;
-      const r = clamp(36 * base * shade * vein, 0, 255);
-      const g = clamp(122 * base * shade * vein, 0, 255);
-      const b = clamp(48 * base * shade * vein, 0, 255);
-      setPx(x, y, r, g, b);
-    }
+  const by = 268;
+  const tipX = bx + dx * len;
+  const tipY = by + dy * len;
+  const mx = bx + dx * len * 0.45;
+  const my = by + dy * len * 0.45;
+  const px_ = Math.cos(a);
+  const py = Math.sin(a);
+  const outer: Array<[number, number]> = [
+    [bx, by],
+    [mx + px_ * wid, my + py * wid],
+    [tipX, tipY],
+    [mx - px_ * wid, my - py * wid],
+  ];
+  fillPoly(outer, 15, 102, 44, 255);
+  const inner: Array<[number, number]> = [
+    [bx + dx * 12, by + dy * 12],
+    [mx + px_ * wid * 0.45, my + py * wid * 0.45],
+    [bx + dx * len * 0.82, by + dy * len * 0.82],
+    [mx - px_ * wid * 0.45, my - py * wid * 0.45],
+  ];
+  fillPoly(inner, 42, 148, 68, 255);
+}
+drawLeaf(-68, 118, 34);
+drawLeaf(-46, 148, 38);
+drawLeaf(-23, 168, 40);
+drawLeaf(0, 176, 42);
+drawLeaf(23, 168, 40);
+drawLeaf(46, 148, 38);
+drawLeaf(68, 118, 34);
+
+// berry body, scanline by scanline
+const TOP = 252;
+const BOT = 906;
+for (let y = TOP; y <= BOT; y++) {
+  const t = (y - TOP) / (BOT - TOP);
+  const wobble = 1 + 0.013 * Math.sin(y * 0.09 + 1.3) + 0.008 * Math.sin(y * 0.031 + 0.4);
+  const w = halfWidth(t) * wobble;
+  for (let x = Math.ceil(512 - w); x <= Math.floor(512 + w); x++) {
+    const nx = (x - 512) / 310;
+    // top rim dips gently at the shoulders
+    if (y < TOP + 46 * nx * nx) continue;
+    // glossy highlight upper-left, deep shade lower-right
+    const hl = Math.exp(
+      -((x - 402) * (x - 402)) / (2 * 150 * 150) - ((y - 398) * (y - 398)) / (2 * 195 * 195),
+    );
+    const gloss = Math.exp(
+      -((x - 432) * (x - 432)) / (2 * 88 * 88) - ((y - 352) * (y - 352)) / (2 * 128 * 128),
+    );
+    const shade = Math.max(0, nx) * 0.55 + Math.max(0, (y - 250) / 655 - 0.55) * 0.38;
+    const n = hash2(x, y) - 0.5;
+    const r = clamp(Math.round(226 + 30 * hl + 22 * gloss - 96 * shade + n * 10), 0, 255);
+    const g = clamp(Math.round(28 + 24 * hl + 10 * gloss - 15 * shade + n * 5), 0, 255);
+    const b = clamp(Math.round(32 + 18 * hl + 8 * gloss - 13 * shade + n * 5), 0, 255);
+    blend(x, y, r, g, b, 255);
   }
 }
-leaf(-72, 128, 17, 0.9);
-leaf(-48, 148, 19, 1.0);
-leaf(-24, 158, 20, 1.05);
-leaf(0, 150, 20, 1.1);
-leaf(24, 156, 20, 1.05);
-leaf(48, 146, 19, 1.0);
-leaf(72, 126, 17, 0.9);
-// Cap that hides the leaf bases.
-ellipse(512, 272, 58, 24, 30, 104, 42);
-ellipse(512, 268, 40, 16, 38, 122, 50);
 
-// Short stem, leaning slightly.
-for (let t = 0; t <= 1.001; t += 0.02) {
-  const sx = Math.round(512 - t * 16);
-  const sy = Math.round(262 - t * 52);
-  const rr = 7 - t * 2.5;
-  ellipse(sx, sy, rr, rr, Math.round(lerp(96, 70, t)), Math.round(lerp(110, 96, t)), 52);
+// pale golden achenes following the body contour
+for (let row = 0; row < 12; row++) {
+  const y = 308 + row * 50;
+  const t = (y - TOP) / (BOT - TOP);
+  const w = halfWidth(t) - 30;
+  if (w < 10) continue;
+  const off = row % 2 ? 26 : 0;
+  for (let x = 512 - w + off; x <= 512 + w; x += 52) {
+    fillEllipse(x + 1, y + 3, 6.5, 9.5, 148, 22, 26, 190);
+    fillEllipse(x, y, 5, 7.5, 246, 214, 128, 255);
+    fillEllipse(x - 1.5, y - 2.5, 1.8, 2.6, 255, 242, 196, 255);
+  }
 }
 
-// ---------- 5b. Dew drops: clear beads with a bright catch-light ----------
-function dew(cx, cy, r) {
-  if (Math.abs(cx - 512) > halfWidth(cy) - 14) return;
-  ellipse(cx, cy, r, r, 225, 240, 250, 0.30, 0.7);
-  ellipse(cx, cy + r * 0.45, r * 0.8, r * 0.45, 120, 40, 45, 0.18, 0.7);
-  ellipse(cx - r * 0.35, cy - r * 0.35, r * 0.32, r * 0.32, 255, 255, 255, 0.85, 0.5);
+// calyx disc + short stem over the berry top
+fillEllipse(512, 274, 80, 30, 14, 94, 40, 255);
+fillEllipse(512, 267, 56, 18, 30, 132, 60, 255);
+for (let i = 0; i <= 24; i++) {
+  const u = i / 24;
+  const sx = 512 + u * 14 + 5 * Math.sin(u * Math.PI * 0.5);
+  const sy = 272 - u * 102;
+  const rad = 5.5 - u * 2.5;
+  fillEllipse(sx, sy, rad, rad * 1.4, 96, 74, 30, 255);
 }
-dew(604, 468, 11);
-dew(418, 558, 9);
-dew(662, 618, 12);
-dew(382, 688, 8);
-dew(558, 742, 10);
-dew(698, 482, 8);
-dew(468, 428, 7);
-dew(620, 780, 9);
 
-// ---------- 5c. Soft vignette: gently darken the far edges ----------
+// clear dew drops on the berry, each with a white sparkle
+const DEW: Array<[number, number, number]> = [
+  [392, 452, 9], [618, 470, 7], [452, 566, 8], [636, 612, 10],
+  [368, 668, 7], [560, 706, 9], [476, 762, 7], [610, 792, 6],
+  [428, 330, 6], [560, 360, 8],
+];
+for (const [dx, dy, dr] of DEW) {
+  fillEllipse(dx, dy, dr, dr, 255, 250, 240, 52);
+  fillEllipse(dx, dy, dr * 0.72, dr * 0.72, 235, 225, 215, 40);
+  fillEllipse(dx - dr * 0.32, dy - dr * 0.38, dr * 0.28, dr * 0.28, 255, 255, 255, 235);
+}
+
+// ---- gentle vignette, darker toward the corners ----
 for (let y = 0; y < H; y++) {
   for (let x = 0; x < W; x++) {
-    const dx = (x - 512) / 724;
-    const dy = (y - 512) / 724;
-    const d = Math.sqrt(dx * dx + dy * dy);
-    const f = 1 - 0.16 * sstep(0.55, 1.05, d);
-    if (f >= 0.999) continue;
-    const i = (y * W + x) * 4;
-    img[i] *= f;
-    img[i + 1] *= f;
-    img[i + 2] *= f;
+    const r = Math.hypot(x - 512, y - 512) / 724;
+    const s = clamp((r - 0.62) / (1.05 - 0.62), 0, 1);
+    const f = 1 - 0.17 * s * s * (3 - 2 * s);
+    if (f < 1) {
+      const i = (y * W + x) * 4;
+      buf[i] = Math.round(buf[i] * f);
+      buf[i + 1] = Math.round(buf[i + 1] * f);
+      buf[i + 2] = Math.round(buf[i + 2] * f);
+    }
   }
 }
 
-// ---------- 6. PNG encoding (own encoder: IHDR / IDAT / IEND, CRC32) ----------
-const CRC_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    table[n] = c >>> 0;
-  }
-  return table;
-})();
-function crc32(buf) {
+// ---- minimal PNG encoder (signature, IHDR, IDAT, IEND) ----
+const CRC_TABLE = new Int32Array(256);
+for (let n = 0; n < 256; n++) {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  CRC_TABLE[n] = c;
+}
+function crc32(data: Buffer): number {
   let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  for (let i = 0; i < data.length; i++) {
+    c = CRC_TABLE[(c ^ data[i]) & 0xff] ^ (c >>> 8);
+  }
   return (c ^ 0xffffffff) >>> 0;
 }
-function chunk(type, data) {
-  const out = Buffer.alloc(12 + data.length);
-  out.writeUInt32BE(data.length, 0);
-  out.write(type, 4, "ascii");
-  data.copy(out, 8);
-  out.writeUInt32BE(crc32(Buffer.concat([Buffer.from(type, "ascii"), data])), 8 + data.length);
-  return out;
+function pngChunk(type: string, data: Buffer): Buffer {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(body), 0);
+  return Buffer.concat([len, body, crc]);
 }
 
-const outPath = process.argv[2] || "/output/entry.png";
-// Build scanlines, picking the smallest filter per row (None / Sub / Up).
-const rowBytes = W * 4;
-const raw = Buffer.alloc(H * (1 + rowBytes));
-const prev = Buffer.alloc(rowBytes);
+const outPath = process.argv[2] ?? "/output/entry.png";
+mkdirSync(dirname(outPath), { recursive: true });
+const raw = Buffer.alloc(H * (1 + W * 4));
 for (let y = 0; y < H; y++) {
-  const row = img.subarray(y * rowBytes, (y + 1) * rowBytes);
-  const cands = [];
-  for (const f of [0, 1, 2]) {
-    const fb = Buffer.alloc(rowBytes);
-    for (let i = 0; i < rowBytes; i++) {
-      let v = row[i];
-      if (f === 1 && i >= 4) v -= row[i - 4];
-      if (f === 2) v -= prev[i];
-      fb[i] = v & 0xff;
-    }
-    let score = 0;
-    for (let i = 0; i < rowBytes; i++) {
-      const s = fb[i] > 127 ? fb[i] - 256 : fb[i];
-      score += s < 0 ? -s : s;
-    }
-    cands.push([score, f, fb]);
-  }
-  cands.sort((a, b) => a[0] - b[0]);
-  const best = cands[0];
-  raw[y * (1 + rowBytes)] = best[1];
-  best[2].copy(raw, y * (1 + rowBytes) + 1);
-  row.copy(prev);
+  raw[y * (1 + W * 4)] = 0;
+  Buffer.from(buf.buffer, y * W * 4, W * 4).copy(raw, y * (1 + W * 4) + 1);
 }
 const ihdr = Buffer.alloc(13);
 ihdr.writeUInt32BE(W, 0);
 ihdr.writeUInt32BE(H, 4);
 ihdr[8] = 8; // bit depth
-ihdr[9] = 6; // color type RGBA
+ihdr[9] = 6; // RGBA
 ihdr[10] = 0;
 ihdr[11] = 0;
 ihdr[12] = 0;
 const png = Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-  chunk("IHDR", ihdr),
-  chunk("IDAT", deflateSync(raw, { level: 9 })),
-  chunk("IEND", Buffer.alloc(0)),
+  pngChunk("IHDR", ihdr),
+  pngChunk("IDAT", deflateSync(raw, { level: 9 })),
+  pngChunk("IEND", Buffer.alloc(0)),
 ]);
-mkdirSync(dirname(outPath), { recursive: true });
 writeFileSync(outPath, png);
 console.log(`wrote ${outPath} (${png.length} bytes)`);
