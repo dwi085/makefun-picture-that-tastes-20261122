@@ -347,10 +347,14 @@ function main(): void {
   paintSeeds();
   paintCalyx();
   paintGloss();
-  mkdirSync("/output", { recursive: true });
+  // Grading sandbox: /output/entry.png. Local verification: pass a path,
+  // e.g. `node main.ts ./out/entry.png` (or set OUTPUT_PATH).
+  const outPath = process.argv[2] ?? process.env.OUTPUT_PATH ?? "/output/entry.png";
+  const dir = outPath.slice(0, outPath.lastIndexOf("/")) || ".";
+  mkdirSync(dir, { recursive: true });
   const png = encodePNG();
-  writeFileSync("/output/entry.png", png);
-  console.log("wrote /output/entry.png", png.length, "bytes");
+  writeFileSync(outPath, png);
+  console.log("wrote", outPath, png.length, "bytes");
 }
 main();
 
