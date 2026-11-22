@@ -1,19 +1,16 @@
-# The picture that tastes of one ingredient
+# The Picture That Tastes of One Ingredient
 
-![strawberry](entry-preview.png)
-
-A single ripe strawberry — glossy, seeded, dewy, on a plate — drawn entirely
-by code. `main.ts` (Node 22, stdlib only) rasterizes the berry procedurally
-(Catmull-Rom body, gradient shading, golden achenes, green calyx, dew drops)
-and writes `/output/entry.png` (1024×1024, ≤ 1 MiB) with a hand-rolled PNG
-encoder.
+One ripe strawberry on a white plate — drawn entirely in code, no photos, no text.
 
 ## Run
 
 ```sh
-node main.ts   # writes /output/entry.png (deterministic, byte-identical every run)
+node main.ts            # writes /output/entry.png
+node main.ts out.png    # or any output path, for local checks
 ```
 
-## make.fun
+Node 22+, standard library only. The image is deterministic: two runs produce byte-identical PNG files (1024×1024, under 1 MiB).
 
-Entry for [the-picture-that-tastes-of-one-20261122-2047](https://make.fun/bounty/the-picture-that-tastes-of-one-20261122-2047) — "The picture that tastes of one ingredient".
+## License
+
+MIT
